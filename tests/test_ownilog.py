@@ -14,6 +14,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ownilog import protocol  # noqa: E402
+from ownilog.forward import Forwarder, gspro_shot  # noqa: E402
 import owni_logger  # noqa: E402
 
 
@@ -78,13 +79,16 @@ class SessionTests(unittest.TestCase):
             link = FakeLink()
             with tempfile.TemporaryDirectory() as d:
                 path = os.path.join(d, "shots.jsonl")
-                s = owni_logger.Session(link, "driver", path, [0])
+                s = owni_logger.Session(link, owni_logger.Logger("driver", path))
                 for p in packets:
                     s.handle(p)
                     await asyncio.sleep(0)  # let the 0x87 request task run
                 if s.pending_ball:
                     s.record(s.pending_ball, None)
-                shots = [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+                shots = []
+                if os.path.exists(path):
+                    with open(path) as f:
+                        shots = [json.loads(line) for line in f]
                 return link, shots
         return asyncio.run(go())
 
@@ -104,6 +108,119 @@ class SessionTests(unittest.TestCase):
         _, shots = self.run_handle([ball_packet(), club_packet(mask=0)])
         self.assertEqual(len(shots), 1)
         self.assertNotIn("club", shots[0])
+
+
+class ClubNameTests(unittest.TestCase):
+    def test_aliases(self):
+        for text, key in [("7", "7iron"), ("7i", "7iron"), ("7-Iron", "7iron"), ("3w", "3wood"),
+                          ("4h", "4hybrid"), ("PW", "pw"), ("d", "driver"), ("putt", "putter"),
+                          ("sw", "sw")]:
+            self.assertEqual(protocol.club_name(text), key, text)
+        for bad in ("10", "2iron", "banana", ""):
+            self.assertIsNone(protocol.club_name(bad), bad)
+
+
+def record(shot=1, club=True):
+    rec = {"shot": shot, **protocol.shot_record(protocol.parse(ball_packet()),
+                                                  protocol.parse(club_packet()) if club else None)}
+    return rec
+
+
+class ForwardTests(unittest.TestCase):
+    def test_gspro_shot_fields(self):
+        msg = gspro_shot(record())
+        self.assertEqual(msg["BallData"]["SpinAxis"], 4.0)  # GSPro sign, from the raw -4.0
+        self.assertEqual(msg["BallData"]["HLA"], -1.5)
+        self.assertAlmostEqual(msg["ClubData"]["Speed"], 102.0, places=0)
+        self.assertEqual((msg["ClubData"]["Path"], msg["ClubData"]["FaceToTarget"]), (1.5, 0.5))
+        self.assertTrue(msg["ShotDataOptions"]["ContainsClubData"])
+        no_club = gspro_shot(record(club=False))
+        self.assertNotIn("ClubData", no_club)
+        self.assertFalse(no_club["ShotDataOptions"]["ContainsClubData"])
+
+    def test_forwarder_delivers_and_reconnects(self):
+        async def go():
+            received = []
+
+            async def emulator(reader, writer):
+                data = await reader.read(4096)
+                received.append(json.loads(data))
+                writer.write(json.dumps({"Code": 200, "Message": "Shot received successfully"}).encode())
+                await writer.drain()
+                writer.close()  # the next shot has to reconnect
+
+            server = await asyncio.start_server(emulator, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            fwd = Forwarder("127.0.0.1", port)
+            task = asyncio.create_task(fwd.run())
+            with self.assertLogs("ownilog.forward", "INFO") as logs:
+                fwd.submit(record(1))
+                fwd.submit(record(2))
+                for _ in range(100):
+                    if len(received) == 2 and len(logs.records) == 2:
+                        break
+                    await asyncio.sleep(0.02)
+            task.cancel()
+            fwd._close()
+            server.close()
+            await server.wait_closed()
+            return received, logs.output
+        received, output = asyncio.run(go())
+        self.assertEqual([m["ShotNumber"] for m in received], [1, 2])
+        self.assertTrue(all("forwarded" in line for line in output), output)
+
+    def test_unreachable_emulator_drops_shot(self):
+        async def go():
+            fwd = Forwarder("127.0.0.1", 1)  # nothing listens on port 1
+            task = asyncio.create_task(fwd.run())
+            with self.assertLogs("ownilog.forward", "WARNING") as logs:
+                fwd.submit(record(7))
+                for _ in range(100):
+                    if logs.records:
+                        break
+                    await asyncio.sleep(0.02)
+            task.cancel()
+            return logs.output
+        self.assertIn("shot 7 not forwarded", asyncio.run(go())[0])
+
+
+class LoggerTests(unittest.TestCase):
+    def test_numbering_continues_and_club_is_remembered(self):
+        with tempfile.TemporaryDirectory() as d:
+            shots, state = os.path.join(d, "shots.jsonl"), os.path.join(d, "state.json")
+            with open(shots, "w") as f:
+                f.write(json.dumps({"shot": 41}) + "\n" + json.dumps({"shot": 42}) + "\n")
+            lg = owni_logger.Logger("driver", shots, state)
+            self.assertEqual((lg.shot_count, lg.club), (42, "driver"))
+            asyncio.run(lg.set_club("7iron"))
+            again = owni_logger.Logger("driver", shots, state)
+            self.assertEqual((again.club, again.next_shot_number()), ("7iron", 43))
+
+    def test_control_socket_changes_club_mid_session(self):
+        async def go(d):
+            lg = owni_logger.Logger("driver", os.path.join(d, "shots.jsonl"))
+            link = FakeLink()
+            lg.session = owni_logger.Session(link, lg)
+            lg.session.armed = True
+            sock = os.path.join(d, "ctl", "control.sock")
+            server = await lg.serve_control(sock)
+
+            async def ask(line):
+                r, w = await asyncio.open_unix_connection(sock)
+                w.write((line + "\n").encode())
+                reply = (await r.readline()).decode().strip()
+                w.close()
+                return reply
+
+            replies = [await ask("club 9i"), await ask("club banana"), await ask("status")]
+            server.close()
+            return link, replies
+        with tempfile.TemporaryDirectory() as d:
+            link, (changed, bad, status) = asyncio.run(go(d))
+        self.assertEqual(changed, "club: 9iron (sent to the Owni)")
+        self.assertEqual(link.writes[-1], protocol.club_select(0, "9iron"))
+        self.assertTrue(bad.startswith("error: unknown club"))
+        self.assertEqual(json.loads(status)["club"], "9iron")
 
 
 if __name__ == "__main__":

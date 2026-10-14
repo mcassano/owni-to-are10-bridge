@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Connect to the Owni whenever it's on, and log every shot.
+"""Connect to the Owni whenever it's on, log every shot, and forward it to the emulator.
 
-Independent of the are10 emulator. Shots go to the journal and, as JSON lines,
-to --shots-file. Ball fields are logged in GSPro convention (HLA negative =
-left, spin axis positive = fade) alongside the Owni's raw values.
+Shots go to the journal and, as JSON lines, to --shots-file. Ball fields are
+logged in GSPro convention (HLA negative = left, spin axis positive = fade)
+alongside the Owni's raw values. Each shot is also sent to the are10 emulator's
+GSPro OpenConnect port (--forward, default 127.0.0.1:921; "off" to disable).
+
+The selected club can be changed while running through the control socket
+(owniclub); it's remembered across restarts in --state-file.
 
 Usage: sudo .venv/bin/python owni_logger.py [--club driver] [--shots-file PATH] [-v]
 """
@@ -18,6 +22,7 @@ from typing import Optional
 
 from ownilog import protocol
 from ownilog.central import LinkLost, OwniLink
+from ownilog.forward import Forwarder
 
 log = logging.getLogger("ownilog")
 
@@ -28,12 +33,98 @@ RETRY_DELAY = 3.0
 QUICK_RETRIES = 4          # reconnect attempts on a known device before rescanning
 
 
-class Session:
-    def __init__(self, link: OwniLink, club: str, shots_file: str, shot_counter: list):
-        self.link = link
-        self.club = club
+class Logger:
+    """What outlives a connection: selected club, shot numbering, forwarding."""
+
+    def __init__(self, club: str, shots_file: str, state_file: Optional[str] = None,
+                 forwarder: Optional[Forwarder] = None):
         self.shots_file = shots_file
-        self.shot_counter = shot_counter
+        self.state_file = state_file
+        self.forwarder = forwarder
+        self.club = self._saved_club() or club
+        self.shot_count = self._last_shot_number()
+        self.session: Optional["Session"] = None
+
+    def _saved_club(self) -> Optional[str]:
+        try:
+            with open(self.state_file) as f:
+                return protocol.club_name(json.load(f).get("club", ""))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return None
+
+    def _last_shot_number(self) -> int:
+        """Continue numbering from the shots file instead of restarting at 1."""
+        try:
+            with open(self.shots_file, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 4096))
+                last = f.read().splitlines()[-1]
+            return int(json.loads(last)["shot"])
+        except (OSError, IndexError, ValueError, KeyError, TypeError):
+            return 0
+
+    async def set_club(self, club: str) -> str:
+        self.club = club
+        if self.state_file:
+            try:
+                with open(self.state_file, "w") as f:
+                    json.dump({"club": club}, f)
+            except OSError as e:
+                log.warning("could not save club to %s: %s", self.state_file, e)
+        if self.session is not None and self.session.armed:
+            await self.session.send(protocol.club_select, club)
+            log.info("club: %s (sent to the Owni)", club)
+            return f"club: {club} (sent to the Owni)"
+        log.info("club: %s (used when the Owni connects)", club)
+        return f"club: {club} (used when the Owni connects)"
+
+    def status(self) -> dict:
+        s = self.session
+        return {"club": self.club, "connected": s is not None and s.armed,
+                "state": s.state_name if s else None,
+                "battery": s.battery[0] if s and s.battery else None,
+                "shots": self.shot_count}
+
+    def next_shot_number(self) -> int:
+        self.shot_count += 1
+        return self.shot_count
+
+    async def serve_control(self, path: str):
+        """Line commands: "club <name>", "status"."""
+        async def client(reader, writer):
+            try:
+                line = (await asyncio.wait_for(reader.readline(), 5)).decode().strip()
+                cmd, _, arg = line.partition(" ")
+                if cmd == "club" and arg:
+                    club = protocol.club_name(arg)
+                    if club is None:
+                        reply = f"error: unknown club {arg!r}; one of: {', '.join(protocol.CLUBS)}"
+                    else:
+                        reply = await self.set_club(club)
+                elif cmd == "status":
+                    reply = json.dumps(self.status())
+                else:
+                    reply = "error: commands are 'club <name>' and 'status'"
+            except Exception as e:  # keep the logger alive whatever a client sends
+                reply = f"error: {e}"
+            writer.write((reply + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        if os.path.exists(path):
+            os.unlink(path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        server = await asyncio.start_unix_server(client, path)
+        os.chmod(path, 0o666)  # owniclub works without sudo
+        log.info("control socket: %s", path)
+        return server
+
+
+class Session:
+    def __init__(self, link: OwniLink, logger: Logger):
+        self.link = link
+        self.logger = logger
+        self.armed = False
         self.queue: asyncio.Queue = asyncio.Queue()
         self.seq = 0
         self.last_payload: Optional[bytes] = None
@@ -61,9 +152,10 @@ class Session:
 
         await self.send(protocol.query)
         await self.send(protocol.heartbeat)
-        await self.send(protocol.club_select, self.club)
+        await self.send(protocol.club_select, self.logger.club)
         await self.send(protocol.detect_ball, True)
-        log.info("armed (club: %s); waiting for shots", self.club)
+        self.armed = True
+        log.info("armed (club: %s); waiting for shots", self.logger.club)
 
         heartbeat = asyncio.create_task(self.heartbeats())
         try:
@@ -84,6 +176,10 @@ class Session:
                     self.record(self.pending_ball, None)
         finally:
             heartbeat.cancel()
+
+    @property
+    def state_name(self) -> Optional[str]:
+        return None if self.state is None else protocol.DEVICE_STATES.get(self.state, str(self.state))
 
     async def heartbeats(self):
         while True:
@@ -120,9 +216,8 @@ class Session:
 
     def record(self, ball: protocol.BallMetrics, club: Optional[protocol.ClubMetrics]):
         self.pending_ball = None
-        self.shot_counter[0] += 1
-        rec = {"shot": self.shot_counter[0], "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-               "club_selected": self.club, **protocol.shot_record(ball, club)}
+        rec = {"shot": self.logger.next_shot_number(), "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "club_selected": self.logger.club, **protocol.shot_record(ball, club)}
         side = "L" if ball.direction < 0 else "R"
         curve = "fade" if rec["spin_axis"] > 0 else "draw" if rec["spin_axis"] < 0 else "straight"
         club_txt = ""
@@ -134,27 +229,45 @@ class Session:
                  rec["shot"], rec["ball_speed_mph"], ball.launch_angle, abs(ball.direction), side,
                  ball.total_spin, rec["spin_axis"], curve, club_txt)
         try:
-            with open(self.shots_file, "a") as f:
+            with open(self.logger.shots_file, "a") as f:
                 f.write(json.dumps(rec) + "\n")
         except OSError as e:
-            log.warning("could not write %s: %s", self.shots_file, e)
+            log.warning("could not write %s: %s", self.logger.shots_file, e)
+        if self.logger.forwarder is not None:
+            self.logger.forwarder.submit(rec)
 
 
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", default="hci0",
                     help="hciN or the controller's Bluetooth address (stable across reboots)")
-    ap.add_argument("--club", default="driver", choices=sorted(protocol.CLUBS))
+    ap.add_argument("--club", default="driver", type=protocol.club_name,
+                    help="club when no club was saved (" + ", ".join(protocol.CLUBS) + ")")
     ap.add_argument("--shots-file", default="/var/lib/owni-logger/shots.jsonl")
+    ap.add_argument("--state-file", default="/var/lib/owni-logger/state.json")
+    ap.add_argument("--control", default="/run/owni-logger/control.sock",
+                    help="UNIX socket for owniclub")
+    ap.add_argument("--forward", default="127.0.0.1:921",
+                    help='are10 emulator shot port, HOST:PORT, or "off"')
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     os.makedirs(os.path.dirname(args.shots_file), exist_ok=True)
 
+    if args.club is None:
+        ap.error("unknown --club")
+    forwarder = None
+    if args.forward != "off":
+        host, _, port = args.forward.rpartition(":")
+        forwarder = Forwarder(host or "127.0.0.1", int(port))
+        asyncio.get_running_loop().create_task(forwarder.run())
+        log.info("forwarding shots to %s:%s", host or "127.0.0.1", port)
+    logger = Logger(args.club, args.shots_file, args.state_file, forwarder)
+    await logger.serve_control(args.control)
+
     link = OwniLink(args.adapter)
     await link.start()
-    shot_counter = [0]
     log.info("looking for the Owni (turn it on)")
     searching_logged = False
     while True:
@@ -170,11 +283,13 @@ async def main():
         for attempt in range(1, QUICK_RETRIES + 1):
             try:
                 await link.connect(path)
-                await Session(link, args.club, args.shots_file, shot_counter).run()
+                logger.session = Session(link, logger)
+                await logger.session.run()
                 break
             except (LinkLost, RuntimeError, asyncio.TimeoutError) as e:
                 log.info("attempt %d: %s", attempt, e)
             finally:
+                logger.session = None
                 await link.disconnect()
             await asyncio.sleep(1.0)
         await asyncio.sleep(RETRY_DELAY)

@@ -11,6 +11,7 @@ DEST=/opt/owni-logger
 
 mkdir -p "$DEST"
 cp -R "$SRC/ownilog" "$SRC/owni_logger.py" "$DEST/"
+install -m 755 "$SRC/owni_club.py" /usr/local/bin/owniclub   # club selection
 [ -x "$DEST/.venv/bin/python" ] || python3 -m venv "$DEST/.venv"
 "$DEST/.venv/bin/pip" install --quiet dbus-fast
 
@@ -22,4 +23,5 @@ if [ "${1:-}" = "--enable" ]; then
 else
     echo "Installed (not enabled). Start with: sudo systemctl enable --now owni-logger"
 fi
-echo "Shots are appended to /var/lib/owni-logger/shots.jsonl"
+echo "Shots are appended to /var/lib/owni-logger/shots.jsonl and forwarded to the are10 emulator."
+echo "Change club: owniclub 7iron   (owniclub alone shows status)"

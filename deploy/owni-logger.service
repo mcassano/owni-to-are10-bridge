@@ -1,5 +1,5 @@
 [Unit]
-Description=Owni shot logger (BLE central)
+Description=Owni shot logger (BLE central), forwards shots to the are10 emulator
 After=bluetooth.service
 Requires=bluetooth.service
 
@@ -10,6 +10,7 @@ Environment=ADAPTER=AC:A7:F1:BD:45:FE
 ExecStart=/opt/owni-logger/.venv/bin/python owni_logger.py --adapter ${ADAPTER}
 Restart=on-failure
 RestartSec=5
+RuntimeDirectory=owni-logger
 
 [Install]
 WantedBy=multi-user.target

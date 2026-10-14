@@ -1,17 +1,17 @@
 # owni-to-are10-bridge
 
 Feed an Owni launch monitor into Dome Tee Nero, which only accepts an are10, using a Raspberry Pi 4.
-Two independent pieces; they're not connected to each other yet.
+Two services on the Pi: the Owni logger receives each shot and hands it to the are10 emulator.
 
 - **are10 emulator** (`are10emu`). The Pi presents itself to Dome Tee Nero on iOS as an
   are10, and sends it shots that arrive on a GSPro OpenConnect TCP port (921).
   **Works:** pairing, sync and shots on a course.
 - **Owni logger** (`owni-logger`). The Pi connects to the Owni whenever it's on
-  and logs every shot. It runs on a USB Bluetooth adapter (TP-Link UB500 Plus); the emulator
-  keeps the Pi's built-in radio.
+  logs every shot, and forwards it to the emulator's shot port. `owniclub` changes the club.
+  It runs on a USB Bluetooth adapter (TP-Link UB500 Plus); the emulator keeps the Pi's built-in radio.
 
 ```
-Owni ──BLE──► Pi: owni-logger ──(not yet)──► Pi: are10emu ──BLE──► Dome Tee Nero (iOS)
+Owni ──BLE──► Pi: owni-logger ──TCP:921──► Pi: are10emu ──BLE──► Dome Tee Nero (iOS)
                                           TCP:921 ◄── are10shot (test shots)
 ```
 
@@ -28,7 +28,9 @@ Owni ──BLE──► Pi: owni-logger ──(not yet)──► Pi: are10emu �
 | `send_shot.py` | Test shots (installed on the Pi as `are10shot`) |
 | `ownilog/protocol.py` | Owni commands and notification parsing |
 | `ownilog/central.py` | BlueZ GATT client for the Owni |
-| `owni_logger.py` | Owni logger entry point |
+| `ownilog/forward.py` | Sends logged shots to the emulator as GSPro OpenConnect JSON |
+| `owni_logger.py` | Owni logger entry point (also serves the `owniclub` control socket) |
+| `owni_club.py` | Club selection and status (installed on the Pi as `owniclub`) |
 | `deploy/` | Pi install scripts and systemd units |
 | `tests/` | Unit tests for both pieces |
 | `tools/pklg_att.py`, `tools/pklg_gfdi.py` | Decode PacketLogger traces: ATT/SMP, then MultiLink/GFDI |
@@ -91,6 +93,17 @@ with per-frame logging, stop its service and run it with `-v`.
 3. On the Pi, send a shot with `are10shot`. Variants: `are10shot 7iron`, `are10shot wedge`, `are10shot --speed 160 --axis -5`.
    HLA negative = left; spin axis positive = fade.
 
+## Playing with the Owni
+
+1. Turn the Owni on. The logger connects within about 20 s (`owniclub` shows the status).
+2. Connect Dome Tee Nero to the emulator as above, and start a round or the range.
+3. Pick the club you're hitting: `owniclub 7` (also `7i`, `3w`, `4h`, `pw`, `sw`, `driver`, `putter`).
+   The Owni uses it to classify the shot, and `putter` is its putting mode. The app never tells the
+   device which club you picked, so this is separate from the app's club. It's remembered across restarts.
+4. Hit. Each shot shows up in the app and in `journalctl -u owni-logger -f` ("shot N forwarded").
+
+A shot that arrives while the app isn't connected and armed is logged but dropped, not saved for later.
+
 ## Status and open items
 
 **are10 emulator.** Matches the real are10's handshake byte for byte (38/38 messages when replayed
@@ -102,7 +115,7 @@ against `captures/dtn_are10.pklg`).
   mapped yet: service 4 `03`, protobuf field 13, message 5045. None of them block shots.
 - **Swing tempo.** SwingMetrics are omitted because the Owni doesn't measure them.
 
-**Owni logger.** It connected, armed the Owni, and logged a putt end to end. Shots go to
+**Owni logger.** Shots go to
 `/var/lib/owni-logger/shots.jsonl` in GSPro convention (spin axis negated from the Owni's raw
 value), with the raw values kept alongside.
 - **Use a USB adapter.** On the built-in radio, link setup fails about half the time (LE Read
@@ -111,7 +124,7 @@ value), with the raw values kept alongside.
   on the first try.
 - **The Owni takes 10–20 s to advertise again after a disconnect.** The logger keeps scanning
   until it reappears.
-- **Club selection is fixed at startup** (`--club`, default driver). Selecting the putter is the
-  Owni's putting mode.
+- **Face and path signs aren't verified.** They're forwarded with the Owni's signs. Check them with
+  a deliberately open-faced shot (the app should show an open face).
 - **BlueZ quirks for the Owni:** set `Trusted` first; keep `Connect()` pending, because sending it
   with no-reply makes BlueZ drop the link; register a pairing agent in the logger's process.
