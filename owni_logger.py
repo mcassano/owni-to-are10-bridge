@@ -6,10 +6,12 @@ logged in GSPro convention (HLA negative = left, spin axis positive = fade)
 alongside the Owni's raw values. Each shot is also sent to the are10 emulator's
 GSPro OpenConnect port (--forward, default 127.0.0.1:921; "off" to disable).
 
-The selected club can be changed while running through the control socket
-(owniclub); it's remembered across restarts in --state-file.
+The Owni won't detect a ball until it's told a club, so it's always armed with
+the driver: Dome Tee Nero never learns the club, and the Owni only uses it for
+putting mode and vertical face impact, neither of which reaches the app.
+ownistatus shows the connection, battery and shot count (control socket).
 
-Usage: sudo .venv/bin/python owni_logger.py [--club driver] [--shots-file PATH] [-v]
+Usage: sudo .venv/bin/python owni_logger.py [--shots-file PATH] [-v]
 """
 
 import argparse
@@ -30,27 +32,18 @@ HEARTBEAT_EVERY = 5.0
 SILENCE_LIMIT = 15.0       # three missed heartbeats → treat link as lost
 CLUB_REPLY_WAIT = 3.0      # how long to wait for 0x07 after a ball packet
 RETRY_DELAY = 3.0
+ARM_CLUB = "driver"
 QUICK_RETRIES = 4          # reconnect attempts on a known device before rescanning
 
 
 class Logger:
-    """What outlives a connection: selected club, shot numbering, forwarding."""
+    """What outlives a connection: shot numbering and forwarding."""
 
-    def __init__(self, club: str, shots_file: str, state_file: Optional[str] = None,
-                 forwarder: Optional[Forwarder] = None):
+    def __init__(self, shots_file: str, forwarder: Optional[Forwarder] = None):
         self.shots_file = shots_file
-        self.state_file = state_file
         self.forwarder = forwarder
-        self.club = self._saved_club() or club
         self.shot_count = self._last_shot_number()
         self.session: Optional["Session"] = None
-
-    def _saved_club(self) -> Optional[str]:
-        try:
-            with open(self.state_file) as f:
-                return protocol.club_name(json.load(f).get("club", ""))
-        except (OSError, ValueError, TypeError, AttributeError):
-            return None
 
     def _last_shot_number(self) -> int:
         """Continue numbering from the shots file instead of restarting at 1."""
@@ -63,24 +56,9 @@ class Logger:
         except (OSError, IndexError, ValueError, KeyError, TypeError):
             return 0
 
-    async def set_club(self, club: str) -> str:
-        self.club = club
-        if self.state_file:
-            try:
-                with open(self.state_file, "w") as f:
-                    json.dump({"club": club}, f)
-            except OSError as e:
-                log.warning("could not save club to %s: %s", self.state_file, e)
-        if self.session is not None and self.session.armed:
-            await self.session.send(protocol.club_select, club)
-            log.info("club: %s (sent to the Owni)", club)
-            return f"club: {club} (sent to the Owni)"
-        log.info("club: %s (used when the Owni connects)", club)
-        return f"club: {club} (used when the Owni connects)"
-
     def status(self) -> dict:
         s = self.session
-        return {"club": self.club, "connected": s is not None and s.armed,
+        return {"connected": s is not None and s.armed,
                 "state": s.state_name if s else None,
                 "battery": s.battery[0] if s and s.battery else None,
                 "shots": self.shot_count}
@@ -90,21 +68,14 @@ class Logger:
         return self.shot_count
 
     async def serve_control(self, path: str):
-        """Line commands: "club <name>", "status"."""
+        """Line command: "status"."""
         async def client(reader, writer):
             try:
                 line = (await asyncio.wait_for(reader.readline(), 5)).decode().strip()
-                cmd, _, arg = line.partition(" ")
-                if cmd == "club" and arg:
-                    club = protocol.club_name(arg)
-                    if club is None:
-                        reply = f"error: unknown club {arg!r}; one of: {', '.join(protocol.CLUBS)}"
-                    else:
-                        reply = await self.set_club(club)
-                elif cmd == "status":
+                if line == "status":
                     reply = json.dumps(self.status())
                 else:
-                    reply = "error: commands are 'club <name>' and 'status'"
+                    reply = "error: the only command is 'status'"
             except Exception as e:  # keep the logger alive whatever a client sends
                 reply = f"error: {e}"
             writer.write((reply + "\n").encode())
@@ -115,7 +86,7 @@ class Logger:
             os.unlink(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         server = await asyncio.start_unix_server(client, path)
-        os.chmod(path, 0o666)  # owniclub works without sudo
+        os.chmod(path, 0o666)  # ownistatus works without sudo
         log.info("control socket: %s", path)
         return server
 
@@ -152,10 +123,10 @@ class Session:
 
         await self.send(protocol.query)
         await self.send(protocol.heartbeat)
-        await self.send(protocol.club_select, self.logger.club)
+        await self.send(protocol.club_select, ARM_CLUB)
         await self.send(protocol.detect_ball, True)
         self.armed = True
-        log.info("armed (club: %s); waiting for shots", self.logger.club)
+        log.info("armed; waiting for shots")
 
         heartbeat = asyncio.create_task(self.heartbeats())
         try:
@@ -217,7 +188,7 @@ class Session:
     def record(self, ball: protocol.BallMetrics, club: Optional[protocol.ClubMetrics]):
         self.pending_ball = None
         rec = {"shot": self.logger.next_shot_number(), "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-               "club_selected": self.logger.club, **protocol.shot_record(ball, club)}
+               **protocol.shot_record(ball, club)}
         side = "L" if ball.direction < 0 else "R"
         curve = "fade" if rec["spin_axis"] > 0 else "draw" if rec["spin_axis"] < 0 else "straight"
         club_txt = ""
@@ -241,12 +212,9 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--adapter", default="hci0",
                     help="hciN or the controller's Bluetooth address (stable across reboots)")
-    ap.add_argument("--club", default="driver", type=protocol.club_name,
-                    help="club when no club was saved (" + ", ".join(protocol.CLUBS) + ")")
     ap.add_argument("--shots-file", default="/var/lib/owni-logger/shots.jsonl")
-    ap.add_argument("--state-file", default="/var/lib/owni-logger/state.json")
     ap.add_argument("--control", default="/run/owni-logger/control.sock",
-                    help="UNIX socket for owniclub")
+                    help="UNIX socket for ownistatus")
     ap.add_argument("--forward", default="127.0.0.1:921",
                     help='are10 emulator shot port, HOST:PORT, or "off"')
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -255,15 +223,13 @@ async def main():
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     os.makedirs(os.path.dirname(args.shots_file), exist_ok=True)
 
-    if args.club is None:
-        ap.error("unknown --club")
     forwarder = None
     if args.forward != "off":
         host, _, port = args.forward.rpartition(":")
         forwarder = Forwarder(host or "127.0.0.1", int(port))
         asyncio.get_running_loop().create_task(forwarder.run())
         log.info("forwarding shots to %s:%s", host or "127.0.0.1", port)
-    logger = Logger(args.club, args.shots_file, args.state_file, forwarder)
+    logger = Logger(args.shots_file, forwarder)
     await logger.serve_control(args.control)
 
     link = OwniLink(args.adapter)

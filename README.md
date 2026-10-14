@@ -7,7 +7,7 @@ Two services on the Pi: the Owni logger receives each shot and hands it to the a
   are10, and sends it shots that arrive on a GSPro OpenConnect TCP port (921).
   **Works:** pairing, sync and shots on a course.
 - **Owni logger** (`owni-logger`). The Pi connects to the Owni whenever it's on
-  logs every shot, and forwards it to the emulator's shot port. `owniclub` changes the club.
+  logs every shot, and forwards it to the emulator's shot port. `ownistatus` shows its status.
   It runs on a USB Bluetooth adapter (TP-Link UB500 Plus); the emulator keeps the Pi's built-in radio.
 
 ```
@@ -29,8 +29,8 @@ Owni ──BLE──► Pi: owni-logger ──TCP:921──► Pi: are10emu ─�
 | `ownilog/protocol.py` | Owni commands and notification parsing |
 | `ownilog/central.py` | BlueZ GATT client for the Owni |
 | `ownilog/forward.py` | Sends logged shots to the emulator as GSPro OpenConnect JSON |
-| `owni_logger.py` | Owni logger entry point (also serves the `owniclub` control socket) |
-| `owni_club.py` | Club selection and status (installed on the Pi as `owniclub`) |
+| `owni_logger.py` | Owni logger entry point (also serves the `ownistatus` control socket) |
+| `owni_status.py` | Logger status (installed on the Pi as `ownistatus`) |
 | `vizy_power.py` | Vizy enclosure light, power button and fan (optional) |
 | `deploy/` | Pi install scripts and systemd units |
 | `tests/` | Unit tests for both pieces |
@@ -96,14 +96,15 @@ with per-frame logging, stop its service and run it with `-v`.
 
 ## Playing with the Owni
 
-1. Turn the Owni on. The logger connects within about 20 s (`owniclub` shows the status).
+1. Turn the Owni on. The logger connects within about 20 s (`ownistatus` shows the status).
 2. Connect Dome Tee Nero to the emulator as above, and start a round or the range.
-3. Pick the club you're hitting: `owniclub 7` (also `7i`, `3w`, `4h`, `pw`, `sw`, `driver`, `putter`).
-   The Owni uses it to classify the shot, and `putter` is its putting mode. The app never tells the
-   device which club you picked, so this is separate from the app's club. It's remembered across restarts.
-4. Hit. Each shot shows up in the app and in `journalctl -u owni-logger -f` ("shot N forwarded").
+3. Hit. Each shot shows up in the app and in `journalctl -u owni-logger -f` ("shot N forwarded").
 
 A shot that arrives while the app isn't connected and armed is logged but dropped, not saved for later.
+
+There's no club selection. The Owni has to be told a club before it detects a ball, so the logger
+always arms it with the driver; the app never learns the club either way. The club only changes the
+Owni's putting mode (the putter) and its vertical face impact, and neither reaches the app.
 
 ## SD card care
 

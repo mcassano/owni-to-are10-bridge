@@ -79,7 +79,7 @@ class SessionTests(unittest.TestCase):
             link = FakeLink()
             with tempfile.TemporaryDirectory() as d:
                 path = os.path.join(d, "shots.jsonl")
-                s = owni_logger.Session(link, owni_logger.Logger("driver", path))
+                s = owni_logger.Session(link, owni_logger.Logger(path))
                 for p in packets:
                     s.handle(p)
                     await asyncio.sleep(0)  # let the 0x87 request task run
@@ -108,16 +108,6 @@ class SessionTests(unittest.TestCase):
         _, shots = self.run_handle([ball_packet(), club_packet(mask=0)])
         self.assertEqual(len(shots), 1)
         self.assertNotIn("club", shots[0])
-
-
-class ClubNameTests(unittest.TestCase):
-    def test_aliases(self):
-        for text, key in [("7", "7iron"), ("7i", "7iron"), ("7-Iron", "7iron"), ("3w", "3wood"),
-                          ("4h", "4hybrid"), ("PW", "pw"), ("d", "driver"), ("putt", "putter"),
-                          ("sw", "sw")]:
-            self.assertEqual(protocol.club_name(text), key, text)
-        for bad in ("10", "2iron", "banana", ""):
-            self.assertIsNone(protocol.club_name(bad), bad)
 
 
 def record(shot=1, club=True):
@@ -185,23 +175,29 @@ class ForwardTests(unittest.TestCase):
 
 
 class LoggerTests(unittest.TestCase):
-    def test_numbering_continues_and_club_is_remembered(self):
+    def test_numbering_continues(self):
         with tempfile.TemporaryDirectory() as d:
-            shots, state = os.path.join(d, "shots.jsonl"), os.path.join(d, "state.json")
+            shots = os.path.join(d, "shots.jsonl")
             with open(shots, "w") as f:
                 f.write(json.dumps({"shot": 41}) + "\n" + json.dumps({"shot": 42}) + "\n")
-            lg = owni_logger.Logger("driver", shots, state)
-            self.assertEqual((lg.shot_count, lg.club), (42, "driver"))
-            asyncio.run(lg.set_club("7iron"))
-            again = owni_logger.Logger("driver", shots, state)
-            self.assertEqual((again.club, again.next_shot_number()), ("7iron", 43))
+            self.assertEqual(owni_logger.Logger(shots).next_shot_number(), 43)
 
-    def test_control_socket_changes_club_mid_session(self):
-        async def go(d):
-            lg = owni_logger.Logger("driver", os.path.join(d, "shots.jsonl"))
+    def test_arms_with_the_driver(self):
+        async def go():
+            lg = owni_logger.Logger(os.devnull)
             link = FakeLink()
-            lg.session = owni_logger.Session(link, lg)
-            lg.session.armed = True
+            session = owni_logger.Session(link, lg)
+            task = asyncio.create_task(session.run())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            return link.writes
+        writes = asyncio.run(go())
+        self.assertIn(protocol.club_select(2, "driver"), writes)
+        self.assertEqual(writes[-1][1], protocol.CMD_DETECT_BALL)
+
+    def test_control_socket_status(self):
+        async def go(d):
+            lg = owni_logger.Logger(os.path.join(d, "shots.jsonl"))
             sock = os.path.join(d, "ctl", "control.sock")
             server = await lg.serve_control(sock)
 
@@ -212,15 +208,14 @@ class LoggerTests(unittest.TestCase):
                 w.close()
                 return reply
 
-            replies = [await ask("club 9i"), await ask("club banana"), await ask("status")]
+            replies = [await ask("status"), await ask("club 7i")]
             server.close()
-            return link, replies
+            return replies
         with tempfile.TemporaryDirectory() as d:
-            link, (changed, bad, status) = asyncio.run(go(d))
-        self.assertEqual(changed, "club: 9iron (sent to the Owni)")
-        self.assertEqual(link.writes[-1], protocol.club_select(0, "9iron"))
-        self.assertTrue(bad.startswith("error: unknown club"))
-        self.assertEqual(json.loads(status)["club"], "9iron")
+            status, club = asyncio.run(go(d))
+        self.assertEqual(json.loads(status), {"connected": False, "state": None, "battery": None,
+                                              "shots": 0})
+        self.assertTrue(club.startswith("error"))
 
 
 if __name__ == "__main__":

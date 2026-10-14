@@ -38,27 +38,6 @@ CLUBS = {
     "putter": (0x01, 0x03),
 }
 
-_CLUB_ALIASES = {"d": "driver", "dr": "driver", "1w": "driver", "aw": "gw", "putt": "putter",
-                 "pt": "putter", "p": "pw"}
-_CLUB_SUFFIXES = (("iron", "iron"), ("i", "iron"), ("wood", "wood"), ("w", "wood"),
-                  ("hybrid", "hybrid"), ("hy", "hybrid"), ("h", "hybrid"))
-
-
-def club_name(text: str) -> Optional[str]:
-    """Canonical club key for user input like "7", "7i", "7-iron", "3w", "pw"; None if unknown."""
-    t = text.strip().lower().replace("-", "").replace(" ", "")
-    t = _CLUB_ALIASES.get(t, t)
-    if t in CLUBS:
-        return t
-    if t.isdigit():
-        t += "iron"
-    for suffix, kind in _CLUB_SUFFIXES:
-        if t.endswith(suffix) and t[:-len(suffix)].isdigit():
-            key = t[:-len(suffix)] + kind
-            return key if key in CLUBS else None
-    return None
-
-
 DEVICE_STATES = {0: "none", 1: "idle", 2: "initialising", 3: "detecting",
                  4: "ready", 5: "shot", 6: "done"}
 
