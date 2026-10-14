@@ -105,6 +105,14 @@ with per-frame logging, stop its service and run it with `-v`.
 
 A shot that arrives while the app isn't connected and armed is logged but dropped, not saved for later.
 
+## SD card care
+
+`sudo ./deploy/sd-card-care.sh` cuts writes to the SD card and frees space: it removes the swap
+file (the Pi has RAM to spare), puts `/tmp` in RAM, caps the journal at 32 MB with flushes at most
+every 5 minutes, and turns off the daily package list refresh, the man page index, ModemManager and
+triggerhappy. There are no automatic updates either way; run `sudo apt update && sudo apt upgrade`
+by hand when you want them. Safe to run again.
+
 ## Vizy enclosure (optional)
 
 If the Pi sits in a Vizy enclosure, `sudo ./deploy/install-vizy-power.sh` installs `vizy-power`,
