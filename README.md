@@ -31,7 +31,7 @@ Owni ──BLE──► Pi: owni-logger ──TCP:921──► Pi: are10emu ─�
 | `ownilog/forward.py` | Sends logged shots to the emulator as GSPro OpenConnect JSON |
 | `owni_logger.py` | Owni logger entry point (also serves the `ownistatus` control socket) |
 | `owni_status.py` | Logger status (installed on the Pi as `ownistatus`) |
-| `vizy_power.py` | Vizy enclosure light, power button and fan (optional) |
+| `vizy_power.py` | Vizy enclosure light, power button, fan and ready chime (optional) |
 | `deploy/` | Pi install scripts and systemd units |
 | `tests/` | Unit tests for both pieces |
 | `tools/pklg_att.py`, `tools/pklg_gfdi.py` | Decode PacketLogger traces: ATT/SMP, then MultiLink/GFDI |
@@ -132,6 +132,9 @@ which drives the enclosure's power board over I2C (enabled by the script):
   so unplug and replug the battery. (Fed through the enclosure's 12V input instead, the board
   owns the power: its button turns the Pi on, and it cuts power itself after shutdown.)
 - **Fan:** off below 60 °C, ramping to full speed at 75 °C (the Pi 4 throttles at 80 °C).
+- **Ready chime:** the buzzer plays a ding-dong each time the Owni sees a ball and is ready to hit,
+  so you don't have to look at it. `sudo python3 /opt/vizy-power/vizy_power.py --chime` plays it
+  once. The board's DIP switch 0x10 mutes it.
 - `python3 /opt/vizy-power/vizy_power.py --once` prints the board's status: power source, voltages,
   CPU temperature and fan speed.
 

@@ -174,7 +174,41 @@ class ForwardTests(unittest.TestCase):
         self.assertIn("shot 7 not forwarded", asyncio.run(go())[0])
 
 
+def sensor_packet(counter, ready, detected):
+    return bytes([0x11, 0x01, counter, ready, detected]) + bytes(12)
+
+
 class LoggerTests(unittest.TestCase):
+    def test_ready_events_reach_watchers(self):
+        async def go(d):
+            lg = owni_logger.Logger(os.path.join(d, "shots.jsonl"))
+            sock = os.path.join(d, "control.sock")
+            server = await lg.serve_control(sock)
+            r, w = await asyncio.open_unix_connection(sock)
+            w.write(b"watch\n")
+            for _ in range(50):
+                if lg.watchers:
+                    break
+                await asyncio.sleep(0.01)
+            s = owni_logger.Session(FakeLink(), lg)
+            logs = self.assertLogs("ownilog", "INFO")
+            cm = logs.__enter__()
+            packets = [sensor_packet(1, 0, 1), sensor_packet(2, 1, 1), sensor_packet(3, 1, 1),
+                       sensor_packet(4, 0, 0), sensor_packet(5, 2, 1)]  # flicker within READY_GAP
+            for p in packets:
+                s.handle(p)
+            s.ready_at -= owni_logger.READY_GAP  # next ball, later on
+            s.handle(sensor_packet(6, 0, 0))
+            s.handle(sensor_packet(7, 1, 1))
+            logs.__exit__(None, None, None)
+            self.assertEqual(sum("ball ready" in line for line in cm.output), 2)
+            events = [await asyncio.wait_for(r.readline(), 1) for _ in range(2)]
+            w.close()
+            server.close()
+            return events
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(asyncio.run(go(d)), [b"ready\n", b"ready\n"])
+
     def test_numbering_continues(self):
         with tempfile.TemporaryDirectory() as d:
             shots = os.path.join(d, "shots.jsonl")

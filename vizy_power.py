@@ -9,16 +9,21 @@ a fan, but nothing on a plain Raspberry Pi OS install talks to it. This does:
           thing before the Pi halts). Dim white is the board's own "has power".
   button  hold ~5 s for a clean shutdown (the board flags the long press).
   fan     off below FAN_START, ramping to full at FAN_FULL.
+  buzzer  a ding-dong each time the Owni sees a ball and is ready to hit
+          (events from the owni-logger control socket). DIP switch 0x10 mutes it.
 
 Register layout per Charmed Labs' vizypowerboard.py (hardware 3.0).
 
-Usage: sudo python3 vizy_power.py [--once]   (--once: print board status and exit)
+Usage: sudo python3 vizy_power.py [--once | --chime]
+  --once: print board status and exit; --chime: play the ready chime and exit
 """
 
 import argparse
 import logging
 import signal
+import socket
 import subprocess
+import threading
 import time
 
 import smbus
@@ -31,6 +36,7 @@ REG_POWER = 38           # reads 0x0f after a long button press; [0x1f, t/100ms]
 REG_POWER_ON_SOURCE = 40
 REG_LED = 49             # [mode, r, g, b, on/10ms, off/10ms, flashes, pause/10ms, atten]
 REG_LED_BACKGROUND = 58  # [r, g, b], shown whenever the LED isn't running a pattern
+REG_BUZZER = 61          # [0, freq lo, freq hi, on/10ms, off/10ms, count, shift]
 REG_FAN = 75             # speed 0-4
 EXEC = 0xC0              # command register (semaphore 0xff)
 EXEC_AD = 2
@@ -46,6 +52,9 @@ FAN_START = 60.0  # °C, speed 1
 FAN_FULL = 75.0   # °C, speed 4 (the Pi 4 throttles at 80)
 FAN_HOLD = 30.0   # seconds before slowing the fan down again
 POLL = 1.0
+
+LOGGER_CONTROL = "/run/owni-logger/control.sock"
+CHIME = ((1319, 160), (1047, 450))  # (Hz, ms): E6 then C6, a ding-dong
 
 
 def cpu_temp() -> float:
@@ -64,12 +73,15 @@ def fan_speed_for(temp: float) -> int:
 class Board:
     def __init__(self, bus: int = 1):
         self.bus = smbus.SMBus(bus)
+        self.lock = threading.Lock()  # the chime thread shares the bus
 
     def read(self, reg: int, n: int) -> list:
-        return self.bus.read_i2c_block_data(ADDR, reg, n)
+        with self.lock:
+            return self.bus.read_i2c_block_data(ADDR, reg, n)
 
     def write(self, reg: int, data: list):
-        self.bus.write_i2c_block_data(ADDR, reg, data)
+        with self.lock:
+            self.bus.write_i2c_block_data(ADDR, reg, data)
 
     def hw_version(self) -> list:
         return self.read(REG_HW_VERSION, 2)
@@ -88,6 +100,14 @@ class Board:
             on_ms: int = 100, off_ms: int = 100, pause_ms: int = 200):
         mode = 0x02 if repeat else 0x01
         self.write(REG_LED, [mode, *rgb, on_ms // 10, off_ms // 10, flashes, pause_ms // 10, 255])
+
+    def tone(self, freq: int, ms: int):
+        self.write(REG_BUZZER, [0, freq & 0xFF, freq >> 8, ms // 10, 0, 1, 0])
+
+    def chime(self):
+        for freq, ms in CHIME:
+            self.tone(freq, ms)
+            time.sleep(ms / 1000 + 0.03)
 
     def fan(self, speed: int):
         self.write(REG_FAN, [speed])
@@ -112,6 +132,30 @@ def status(board: Board) -> str:
             f"CPU {cpu_temp():.1f} °C, fan {board.read(REG_FAN, 1)[0]}")
 
 
+def chime_on_ready(board: Board):
+    """Follow owni-logger's events; chime on each "ready". Runs in its own thread."""
+    connected = None
+    while True:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(LOGGER_CONTROL)
+                s.sendall(b"watch\n")
+                if connected is not True:
+                    log.info("chiming when the Owni is ready (%s)", LOGGER_CONTROL)
+                    connected = True
+                for line in s.makefile():
+                    if line.strip() == "ready":
+                        try:
+                            board.chime()
+                        except OSError as e:
+                            log.warning("buzzer: %s", e)
+        except OSError as e:
+            if connected is not False:
+                log.info("owni-logger not reachable (%s); retrying", e)
+                connected = False
+        time.sleep(5)
+
+
 def run(board: Board):
     stop = False
 
@@ -122,6 +166,7 @@ def run(board: Board):
     signal.signal(signal.SIGINT, on_signal)
 
     log.info(status(board))
+    threading.Thread(target=chime_on_ready, args=(board,), daemon=True).start()
     board.background(GREEN)
     board.led((0, 0, 0))
     fan, fan_since = None, 0.0
@@ -154,6 +199,7 @@ def run(board: Board):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="print board status and exit")
+    ap.add_argument("--chime", action="store_true", help="play the ready chime and exit")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     board = Board()
@@ -161,6 +207,9 @@ def main():
         log.warning("untested power board hardware version %s", board.hw_version())
     if args.once:
         print(status(board))
+        return
+    if args.chime:
+        board.chime()
         return
     run(board)
 

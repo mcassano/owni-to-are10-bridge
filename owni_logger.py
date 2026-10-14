@@ -9,7 +9,9 @@ GSPro OpenConnect port (--forward, default 127.0.0.1:921; "off" to disable).
 The Owni won't detect a ball until it's told a club, so it's always armed with
 the driver: Dome Tee Nero never learns the club, and the Owni only uses it for
 putting mode and vertical face impact, neither of which reaches the app.
-ownistatus shows the connection, battery and shot count (control socket).
+ownistatus shows the connection, battery and shot count (control socket). The
+socket also streams "ready" each time the Owni sees a ball and is ready to hit
+(vizy-power chimes on it).
 
 Usage: sudo .venv/bin/python owni_logger.py [--shots-file PATH] [-v]
 """
@@ -34,6 +36,7 @@ CLUB_REPLY_WAIT = 3.0      # how long to wait for 0x07 after a ball packet
 RETRY_DELAY = 3.0
 ARM_CLUB = "driver"
 QUICK_RETRIES = 4          # reconnect attempts on a known device before rescanning
+READY_GAP = 2.0            # seconds; a ready signal that flickers doesn't announce twice
 
 
 class Logger:
@@ -44,6 +47,7 @@ class Logger:
         self.forwarder = forwarder
         self.shot_count = self._last_shot_number()
         self.session: Optional["Session"] = None
+        self.watchers: set = set()
 
     def _last_shot_number(self) -> int:
         """Continue numbering from the shots file instead of restarting at 1."""
@@ -63,15 +67,31 @@ class Logger:
                 "battery": s.battery[0] if s and s.battery else None,
                 "shots": self.shot_count}
 
+    def event(self, name: str):
+        """Send an event line ("ready") to every "watch" client."""
+        for w in list(self.watchers):
+            if w.is_closing():
+                self.watchers.discard(w)
+            else:
+                w.write((name + "\n").encode())
+
     def next_shot_number(self) -> int:
         self.shot_count += 1
         return self.shot_count
 
     async def serve_control(self, path: str):
-        """Line command: "status"."""
+        """Line commands: "status"; "watch" (keeps the connection open for event lines)."""
         async def client(reader, writer):
             try:
                 line = (await asyncio.wait_for(reader.readline(), 5)).decode().strip()
+                if line == "watch":
+                    self.watchers.add(writer)
+                    try:
+                        await reader.read()  # until the client goes away
+                    finally:
+                        self.watchers.discard(writer)
+                        writer.close()
+                    return
                 if line == "status":
                     reply = json.dumps(self.status())
                 else:
@@ -104,6 +124,8 @@ class Session:
         self.pending_since = 0.0
         self.state: Optional[int] = None
         self.battery: Optional[tuple] = None
+        self.ball_ready = False
+        self.ready_at = -READY_GAP
         link.on_notify = self.queue.put_nowait
 
     async def send(self, builder, *args):
@@ -176,6 +198,14 @@ class Session:
         elif isinstance(msg, protocol.ClubMetrics):
             if self.pending_ball:  # otherwise it's a stale shot from before connecting
                 self.record(self.pending_ball, msg)
+        elif isinstance(msg, protocol.Sensor):
+            ready = msg.ready and msg.detected
+            now = time.monotonic()
+            if ready and not self.ball_ready and now - self.ready_at > READY_GAP:
+                log.info("ball ready")
+                self.logger.event("ready")
+                self.ready_at = now
+            self.ball_ready = ready
         elif isinstance(msg, protocol.HeartbeatAck):
             if msg.state != self.state:
                 log.info("device state: %s", msg.state_name)
