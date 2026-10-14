@@ -227,5 +227,31 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
 
 
+class PeripheralTests(unittest.TestCase):
+    """Only the device that's using the emulator ends its session by disconnecting."""
+
+    def signal(self, path, connected):
+        from dbus_fast import Message, MessageType, Variant
+        return Message(message_type=MessageType.SIGNAL, path=path,
+                       interface="org.freedesktop.DBus.Properties", member="PropertiesChanged",
+                       signature="sa{sv}as",
+                       body=["org.bluez.Device1", {"Connected": Variant("b", connected)}, []])
+
+    def test_other_device_disconnect_keeps_the_session(self):
+        from are10emu.bluez import Are10Peripheral
+        per = Are10Peripheral(Are10Device(lambda ch, d: None))
+        per.adapter_path = "/org/bluez/hci0"
+        ipad, phone = per.adapter_path + "/dev_IPAD", per.adapter_path + "/dev_PHONE"
+        resets = []
+        per.device.on_disconnect = lambda: resets.append(True)
+        per._writer(0)(b"\x00", {"device": ipad})
+        per.channels[0].notifying = True
+        per._on_signal(self.signal(phone, True))
+        per._on_signal(self.signal(phone, False))
+        self.assertEqual((resets, per.host, per.channels[0].notifying), ([], ipad, True))
+        per._on_signal(self.signal(ipad, False))
+        self.assertEqual((resets, per.host, per.channels[0].notifying), ([True], None, False))
+
+
 if __name__ == "__main__":
     unittest.main()

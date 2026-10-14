@@ -266,6 +266,7 @@ class Are10Peripheral:
         self.device = device
         self.adapter = adapter
         self.adapter_path = ""
+        self.host: Optional[str] = None  # device path of the app that's writing to us
         self.app = Application()
         self.channels: List[Characteristic] = []
         ident = device.identity
@@ -303,6 +304,10 @@ class Are10Peripheral:
 
     def _writer(self, channel: int):
         def on_write(value: bytes, options: dict):
+            host = options.get("device")
+            if host is not None and host != self.host:
+                log.info("host is %s", host)
+                self.host = host
             if "mtu" in options:
                 self.device.set_mtu(options["mtu"])
             log.debug("ch%d ← %s", channel, value.hex())
@@ -327,8 +332,13 @@ class Are10Peripheral:
             return
         if connected.value:
             log.info("host connected: %s", msg.path)
+        elif self.host is not None and msg.path != self.host:
+            # Another phone or tablet (still remembering the emulator) dropping its own
+            # link; the app session belongs to self.host, so leave it alone.
+            log.info("other device disconnected: %s", msg.path)
         else:
             log.info("host disconnected: %s", msg.path)
+            self.host = None
             self.device.on_disconnect()
             for c in self.channels:
                 c.notifying = False
