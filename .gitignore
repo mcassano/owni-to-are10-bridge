@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+tools/client-harness/target/
+
+# PacketLogger captures and session logs: they contain BLE pairing keys and
+# device identifiers, so they stay local.
+captures/
+*.pklg
+*.btsnoop
+*.log
+
+.DS_Store
+
+# The real device's names, its description file, profile dumps, and copies of
+# third-party protocol docs. Recreate them from your own hardware (README).
+local/

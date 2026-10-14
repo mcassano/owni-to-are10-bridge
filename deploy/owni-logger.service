@@ -1,0 +1,15 @@
+[Unit]
+Description=Owni shot logger (BLE central)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+WorkingDirectory=/opt/owni-logger
+# The TP-Link UB500 Plus USB adapter, by address (hciN can swap between boots).
+Environment=ADAPTER=AC:A7:F1:BD:45:FE
+ExecStart=/opt/owni-logger/.venv/bin/python owni_logger.py --adapter ${ADAPTER}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

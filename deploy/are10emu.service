@@ -1,0 +1,16 @@
+[Unit]
+Description=are10 emulator (BLE peripheral + GSPro OpenConnect shot input)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+WorkingDirectory=/opt/are10emu
+# The Pi's built-in radio, by address: hciN can swap when a USB adapter is plugged in,
+# and the iPhone is bonded to this address.
+Environment=ADAPTER=E4:5F:01:70:45:CE
+ExecStart=/opt/are10emu/.venv/bin/python are10_emulator.py --adapter ${ADAPTER}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
