@@ -9,7 +9,7 @@ a fan, but nothing on a plain Raspberry Pi OS install talks to it. This does:
           thing before the Pi halts). Dim white is the board's own "has power".
   button  hold ~5 s for a clean shutdown (the board flags the long press).
   fan     off below FAN_START, ramping to full at FAN_FULL.
-  buzzer  a ding-dong each time the Owni sees a ball and is ready to hit
+  buzzer  a soft tone each time the Owni sees a ball and is ready to hit
           (events from the owni-logger control socket). DIP switch 0x10 mutes it.
 
 Register layout per Charmed Labs' vizypowerboard.py (hardware 3.0).
@@ -54,7 +54,9 @@ FAN_HOLD = 30.0   # seconds before slowing the fan down again
 POLL = 1.0
 
 LOGGER_CONTROL = "/run/owni-logger/control.sock"
-CHIME = ((1319, 160), (1047, 450))  # (Hz, ms): E6 then C6, a ding-dong
+# (Hz, ms). The buzzer has no volume control; lower notes, further from the piezo's
+# resonance, sound softer.
+CHIME = ((880, 250),)
 
 
 def cpu_temp() -> float:

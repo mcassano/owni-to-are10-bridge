@@ -132,7 +132,7 @@ which drives the enclosure's power board over I2C (enabled by the script):
   so unplug and replug the battery. (Fed through the enclosure's 12V input instead, the board
   owns the power: its button turns the Pi on, and it cuts power itself after shutdown.)
 - **Fan:** off below 60 °C, ramping to full speed at 75 °C (the Pi 4 throttles at 80 °C).
-- **Ready chime:** the buzzer plays a ding-dong each time the Owni sees a ball and is ready to hit,
+- **Ready chime:** the buzzer plays a soft tone each time the Owni sees a ball and is ready to hit,
   so you don't have to look at it. `sudo python3 /opt/vizy-power/vizy_power.py --chime` plays it
   once. The board's DIP switch 0x10 mutes it.
 - `python3 /opt/vizy-power/vizy_power.py --once` prints the board's status: power source, voltages,
