@@ -31,6 +31,7 @@ Owni ──BLE──► Pi: owni-logger ──TCP:921──► Pi: are10emu ─�
 | `ownilog/forward.py` | Sends logged shots to the emulator as GSPro OpenConnect JSON |
 | `owni_logger.py` | Owni logger entry point (also serves the `owniclub` control socket) |
 | `owni_club.py` | Club selection and status (installed on the Pi as `owniclub`) |
+| `vizy_power.py` | Vizy enclosure light, power button and fan (optional) |
 | `deploy/` | Pi install scripts and systemd units |
 | `tests/` | Unit tests for both pieces |
 | `tools/pklg_att.py`, `tools/pklg_gfdi.py` | Decode PacketLogger traces: ATT/SMP, then MultiLink/GFDI |
@@ -103,6 +104,27 @@ with per-frame logging, stop its service and run it with `-v`.
 4. Hit. Each shot shows up in the app and in `journalctl -u owni-logger -f` ("shot N forwarded").
 
 A shot that arrives while the app isn't connected and armed is logged but dropped, not saved for later.
+
+## Vizy enclosure (optional)
+
+If the Pi sits in a Vizy enclosure, `sudo ./deploy/install-vizy-power.sh` installs `vizy-power`,
+which drives the enclosure's power board over I2C (enabled by the script):
+
+| Light | Meaning |
+|---|---|
+| dim white | the board has power; Linux is booting (or nothing has started yet) |
+| green | Linux is running |
+| flashing red | shutting down |
+| off | halted: **safe to unplug** |
+
+- **Shut down:** hold the button about 5 s until the light flashes red, then wait for it to go off.
+  `sudo poweroff` over ssh does the same.
+- **Turn on:** with a USB battery on the Pi's USB-C port, the board can't switch the Pi's power,
+  so unplug and replug the battery. (Fed through the enclosure's 12V input instead, the board
+  owns the power: its button turns the Pi on, and it cuts power itself after shutdown.)
+- **Fan:** off below 60 °C, ramping to full speed at 75 °C (the Pi 4 throttles at 80 °C).
+- `python3 /opt/vizy-power/vizy_power.py --once` prints the board's status: power source, voltages,
+  CPU temperature and fan speed.
 
 ## Status and open items
 

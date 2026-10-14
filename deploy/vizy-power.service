@@ -1,0 +1,11 @@
+[Unit]
+Description=Vizy enclosure: status light, power button (hold 5 s to shut down) and fan
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/vizy-power/vizy_power.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

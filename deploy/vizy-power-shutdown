@@ -1,0 +1,25 @@
+#!/bin/sh
+# systemd runs this right before the Pi halts or reboots, after every service has
+# stopped and the filesystems are read-only. Installed to
+# /usr/lib/systemd/system-shutdown/vizy-power. $1 is poweroff, halt, reboot or kexec.
+#
+# Power board registers: 58 = background RGB, 49 = LED pattern, 40 = power-on source,
+# 38 = power off after N x 100 ms.
+case "$1" in
+    poweroff|halt)
+        # Light off: safe to unplug.
+        i2cset -y 1 0x14 58 0 0 0 i
+        i2cset -y 1 0x14 49 1 0 0 0 10 10 0 20 255 i
+        # If the board itself supplies the Pi (12V input, or it was switched on by
+        # its button or alarm), let it cut power 5 s from now. On Pi USB-C power it can't.
+        case "$(i2cget -y 1 0x14 40 2>/dev/null)" in
+            0x01|0x02|0x03) i2cset -y 1 0x14 38 0x1f 50 i ;;
+        esac
+        ;;
+    *)
+        # Rebooting: dim white, the same "booting" color the board shows at power-up.
+        i2cset -y 1 0x14 58 16 16 16 i
+        i2cset -y 1 0x14 49 1 0 0 0 10 10 0 20 255 i
+        ;;
+esac
+exit 0
